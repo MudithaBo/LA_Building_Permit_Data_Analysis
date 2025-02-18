@@ -1,0 +1,319 @@
+---
+title: 'Comprehensive Analysis of Permit and Inspection Data: Trends and Contractor Performance'
+author: "Muditha Lakmali Bodawatte Gedara"
+date: "2025-02-18"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+**The analysis was conducted using RMarkdown**
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+#load libraries
+library(dplyr)
+library(tidyr)
+library(lattice) 
+library(mice)
+library(mirt)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(tidyverse)
+library(gt)
+library(gtsummary)
+library(gridExtra)
+library(lubridate)
+library(forecast)
+library(caret)
+library(glmmTMB)
+library(performance)
+library(splines)
+library(stringr)
+library(scales)
+```
+
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# Load the datasets
+Inspection_data<-read.csv("C:/Users/bodawatm/iCloudDrive/PHD-Coursework/Curriculum vitae/Governement of Manitoba_Data_Science_Intern/Written_Assessment/Building_and_Safety_Inspections_20250218.csv")
+
+Permit_data<-read.csv("C:/Users/bodawatm/iCloudDrive/PHD-Coursework/Curriculum vitae/Governement of Manitoba_Data_Science_Intern/Written_Assessment/Building_and_Safety_Permit_Information_Old_20250218.csv")
+```
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# Merge two datasets using PERMIT number as the key
+
+# Remove spaces in the PERMIT column of Inspection_data
+Inspection_data <- Inspection_data %>%
+  mutate(PERMIT = str_replace_all(PERMIT, " ", ""))
+
+# Remove hyphens in the PCIS.Permit.. column of Permit_data
+Permit_data <- Permit_data %>%
+  mutate(PCIS.Permit.. = str_replace_all(PCIS.Permit.., "-", ""))
+
+# Merge datasets based on cleaned columns and retain only records where matches exist
+Merged_data <- Inspection_data %>%
+  inner_join(Permit_data, by = c("PERMIT" = "PCIS.Permit.."))
+
+```
+
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# select columns/ variables related to the permit 
+Merged_data_subset<-Merged_data%>%
+  select(
+    PERMIT,
+    Permit.Status,
+    Inspection.Type,
+    Inspection.Result,
+    Permit.Type,
+    Permit.Sub.Type,
+    Permit.Category
+  )
+```
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# Missing data summary
+missing_summary <- Merged_data_subset %>%
+  summarise_all(~ sum(is.na(.))) %>%
+  gather(variable, missing_count) %>%
+  mutate(missing_percentage = (missing_count / nrow(Merged_data_subset)) * 100)
+
+missing_summary
+```
+According to the missing data summary, none of the columns have missing data in the selected columns.
+
+**Question 1: Make a table and a visualization showing an interesting characteristic of the permit and inspection dataset.**
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# Create summary table for Permit status with percentages
+permit_status_summary <- Merged_data_subset %>%
+  group_by(Permit.Status) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Percentage = round((Count / sum(Count)) * 100, 2))
+
+permit_status_summary
+
+```
+**Key findings of the Permit Status Summary**
+
+- The largest proportion of permits (5,998,891 permits, 75.60%) are "Issued", meaning they have been granted approval but are yet to be completed or finalized.
+- Only 1,126,084 permits (14.19%) are marked as "Permit Finaled", indicating that the construction or installation work has been completed and successfully passed inspections.
+- The significant difference between "Issued" and "Finaled" permits may point to potential delays in project completion, backlog in inspections, or abandoned projects.
+- "CofO Issued" (3.88%) and "CofO in Progress" (2.54%) suggest that nearly 6.47% of permits are linked to the issuance of Certificates of Occupancy, which allow buildings to be legally occupied.
+- "Permit Expired" (0.59%) and "Permit Closed" (0.35%) suggest that some permits were not completed or were abandoned before reaching the finalization stage.
+
+**Overall Insights from the Findings:**
+- A large proportion of permits remain in the "Issued" status, indicating that many projects are still in progress or delayed.
+- A relatively small percentage (14.19%) reach "Permit Finaled", suggesting that many permits are not fully completed or approved in a timely manner.
+- The "CofO Issued"  and "CofO in Progress" statuses highlight an ongoing process of granting occupancy approval.
+- Expired and revoked permits account for less than 1% of all permits, meaning most issued permits remain active rather than being officially canceled.
+
+Let us consider the records of Issued permits and see which type of permits being issued
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+# Filter data for only "Issued" permits and calculate percentages of permit type
+issued_permits <- Merged_data_subset %>%
+  filter(Permit.Status == "Issued") %>%
+  group_by(Permit.Type) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Percentage = round((Count / sum(Count)) * 100, 2)) %>%
+  arrange(desc(Percentage))  
+
+# Create the bar plot to visualize the permit type percentages of issued permits
+ggplot(issued_permits, aes(x = reorder(Permit.Type, -Percentage), y = Percentage, fill = Permit.Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(Percentage, "%")), vjust = -0.3, size = 3) + 
+  labs(title = "Percentage Distribution of Permit Types for Issued Permits",
+       x = "Permit Type",
+       y = "Percentage (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  scale_y_continuous(labels = percent_format(scale = 1))  
+
+```
+**Interpretation**
+
+The bar chart shows the percentage distribution of different permit types among issued permits. Building Alterations/Repairs (23.37%), New Buildings (19.93%), and Building Additions (17.24%) account for the majority of issued permits, indicating that most construction activities involve modifications or expansions rather than entirely new structures. In contrast, Non-building Demolitions, Pressure Vessels, and Building Relocations have the lowest percentages, suggesting they are relatively rare permit types.
+
+**Question 2.1: Make a table and a visualization showing the number of inspections by geography. In a sentence or two describe any patterns you observe.**
+
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=10,fig.height=8}
+# Select the columns PERMIT and Latitude & Longitude
+Inspections_vs_locations <- Merged_data %>%
+  select(
+    PERMIT,
+    Latitude.Longitude.y
+  )
+
+# Count inspections per geographic location (Latitude & Longitude) and calculate percentages
+inspection_summary <- Inspections_vs_locations %>%
+  group_by(Latitude.Longitude.y) %>%
+  summarise(Inspection_Count = n(), .groups = "drop") %>%
+  mutate(Percentage = round((Inspection_Count / sum(Inspection_Count)) * 100, 2)) %>%
+  arrange(desc(Inspection_Count))
+
+# Filter out rows where Latitude.Longitude.y is NA or empty
+valid_data <- inspection_summary %>%
+  filter(!is.na(Latitude.Longitude.y) & Latitude.Longitude.y != "")
+
+
+# Select top 20 locations for visualization
+top_locations <- valid_data %>%
+  slice_max(Inspection_Count, n = 20)
+
+top_locations
+
+```
+
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=12,fig.height=8}
+# Create barplot with percentages of inspections
+ggplot(top_locations, aes(x = reorder(Latitude.Longitude.y, -Inspection_Count), y = Percentage, fill = Inspection_Count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(Percentage, "%")), hjust = -0.1, size = 3) +  # Add percentage labels
+  coord_flip() +  # Flip for better readability
+  labs(title = "Top 20 Locations by Inspection Count",
+       x = "Geographic Location (Lat, Long)",
+       y = "Percentage of Total Inspections") +
+  theme_minimal()
+
+```
+**Interpretation**
+
+The most frequently inspected location accounts for 0.38% of all inspections, while other locations have relatively small shares, each contributing less than 0.25% individually. This suggests that inspection activity is fairly distributed across multiple locations, with no single site overwhelmingly dominating the total inspection volume.
+
+**Question 2.2: Make a table and a visualization showing the results of inspections across geographies. In a sentence or two describe any patterns you observe.**
+
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=12,fig.height=8}
+# Select the columns Inspection.Result and Latitude & Longitude
+Inspections_result_vs_locations <- Merged_data %>%
+  select(
+    Inspection.Result,
+    Latitude.Longitude.y
+  )
+
+# Count inspection results per geographic location
+inspection_result_summary_all <- Inspections_result_vs_locations %>%
+  filter(!is.na(Latitude.Longitude.y) & Latitude.Longitude.y != "") %>%  
+  group_by(Latitude.Longitude.y, Inspection.Result) %>%
+  summarise(Inspection_Count = n(), .groups = "drop") %>%
+  mutate(Percentage = round((Inspection_Count / sum(Inspection_Count)) * 100, 2)) %>%
+  arrange(desc(Inspection_Count))  
+
+# Display top 100 records
+inspection_result_summary<-inspection_result_summary_all%>%
+  slice_max(Inspection_Count, n = 100)
+
+inspection_result_summary
+
+```
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=12,fig.height=8}
+# Plot the top 20 records
+ggplot(inspection_result_summary[1:20,], aes(x = reorder(Latitude.Longitude.y, -Inspection_Count), 
+                                     y = Inspection_Count, 
+                                     fill = Inspection.Result)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip for better readability
+  labs(title = "Top 20 Locations by Inspection Results",
+       x = "Geographic Location (Lat, Long)",
+       y = "Number of Inspections",
+       fill = "Inspection Result") +
+  theme_minimal()
+```
+**Interpretation**
+
+The most frequent results include "Approved", "Partial Approval", "Insp Scheduled", and "Conditional Approval", with some locations having significantly higher inspection volumes than others. Notably, certain locations show a higher proportion of "Partial Approval" and "Conditional Approval" inspections, which may indicate more complex projects requiring multiple review stages or areas with stricter regulatory oversight.
+
+
+**Question 2.3: Were there any permits that did not get an inspection?**
+
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=12,fig.height=8}
+# Filter out records where Inspection.Result="No Access for Inspection" or "Not Ready for Inspection" or "Insp Cancelled" or " Cancelled" to check how many permits did not get an inspection
+# As inspection cancelled and cancelled may denote the same category we can combine them to a single category as cancelled
+
+permits_without_inspection <- Inspections_result_vs_locations %>%
+  filter(Inspection.Result %in% c("No Access for Inspection", "Not Ready for Inspection", "Insp Cancelled", "Cancelled")) %>%
+  mutate(Inspection.Result = ifelse(Inspection.Result %in% c("Insp Cancelled", "Cancelled"), "Cancelled", Inspection.Result)) %>%
+  group_by(Inspection.Result) %>%
+  summarise(Count = n(), Mean_Count = mean(n()), .groups = "drop") %>%
+  arrange(desc(Count))
+
+# Display results as a table
+gt(permits_without_inspection) %>%
+  tab_header(title = "Summary of Permits That Did Not Get Inspected")
+
+```
+
+**Answer with key findings**
+
+Yes, there were permits that did not receive an inspection. The table shows that over 1.4 million permits were not inspected due to various reasons.
+
+- The most common reason was "Not Ready for Inspection" (721,944 permits), indicating that a significant number of projects were not prepared for the inspection process.
+- "Cancelled" permits (570,143) represent permits where inspections were either intentionally withdrawn or stopped due to project abandonment or administrative reasons.
+- "No Access for Inspection" (109,110 permits) suggests logistical challenges, such as inspectors being unable to access the site.
+
+**Question 3: Your manager is convinced ‘out of town’ contractors are not as invested in the success of their projects and so are the main culprits when it comes to violations. You are asked to complete an analysis to test this hypothesis.**
+
+Produce a model that quantifies the relationship between a contractor’s place of origin and their inspection outcome history. Investigate any other relevant factors as necessary.
+
+Interpret your results and produce a clear response for your manager.
+
+**Defining the Hypothesis:**
+
+H0: ‘out of town’ contractors are invested in the success of their projects and so are the main culprits when it comes to violations.
+H1: ‘out of town’ contractors are not as invested in the success of their projects and so are the main culprits when it comes to violations.
+
+To test this hypothesis we can use logistic regression. If the out of town variable is significant (i.e., p-value<=0.05), we have evidence to reject the null hypotheses (H0) and conclude that ‘out of town’ contractors are not as invested in the success of their projects.
+
+```{r echo=FALSE, message=FALSE,warning=FALSE, fig.width=12,fig.height=8}
+# Filter the relevant columns from Merged_Data
+filtered_data <- Merged_data %>%
+  select(
+    Permit.Status,             
+    Inspection.Result,         
+    Permit.Type,               
+    Valuation,                 
+    Contractor.s.Business.Name, 
+    Contractor.City,           
+    Contractor.State,          
+    Latitude.Longitude.y       
+  ) %>%
+  na.omit()  
+
+# Let us define the "Out of town" contractors assuming local city as "Los Angeles"
+filtered_data <- filtered_data %>%
+  mutate(Out_of_Town = ifelse(Contractor.City != "LOS ANGELES", 1, 0))
+
+# Define inspection violations (1 = Violation, 0 = No Violation)
+filtered_data <- filtered_data %>%
+  mutate(Violation = ifelse(Inspection.Result %in% c("Partial Approval", "Not Ready for Inspection", "Failed"), 1, 0))
+
+# Change the variable type of columns
+filtered_data <- filtered_data%>%
+  mutate(
+    Permit.Status = as.factor(Permit.Type),
+    Out_of_Town = as.factor(Out_of_Town),
+    Violation = as.factor(Violation)
+  )
+
+# Fit logistic regression model to test the hypothesis
+model <- glm(Violation ~ Out_of_Town + Permit.Type + Valuation, 
+             data = filtered_data, family = binomial)
+
+# Display model summary
+summary(model)
+
+
+```
+**Key Findings from the Logistic Regression Model**
+
+The model summary shows that out-of-town contractors are actually slightly less likely to receive violations than local contractors. The coefficient for Out_of_Town (-0.07488, p < 0.001) is statistically significant, meaning that out-of-town contractors have a small but measurable lower likelihood of receiving an inspection violation. However, this effect is minor and does not suggest a meaningful difference in performance between local and out-of-town contractors.
+
+The most important predictor of inspection violations is permit type. Certain types of work are significantly more likely to result in violations. Plumbing (1.239), HVAC (0.927), and Electrical (0.758) permits show the highest likelihood of violations, indicating that these projects require closer scrutiny. In contrast, permits for swimming pools (-0.669), signs (-1.007), and alterations/repairs (-0.298) have significantly fewer violations. Additionally, higher-valuation projects have a slightly increased likelihood of violations.
+
+**Response to the Manager:**
+
+Our analysis shows that out-of-town contractors are slightly less likely to receive violations than local contractors, and this difference is statistically significant (p < 0.001). However, while the result is statistically meaningful, the actual effect size is very small, meaning it is unlikely to have a major real-world impact. The type of work being done is a much stronger factor in predicting inspection violations. Plumbing, HVAC, and Electrical permits have the highest violation rates, while swimming pools, signs, and general alterations have significantly fewer violations.
